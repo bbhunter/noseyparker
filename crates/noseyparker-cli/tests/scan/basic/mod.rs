@@ -110,7 +110,7 @@ fn scan_unreadable_file() {
     assert!(std::fs::read_to_string(input.path()).is_err());
 
     noseyparker_success!("scan", "-d", scan_env.dspath(), input.path())
-        .stdout(is_match("ERROR.*: Failed to load blob from .*: Permission denied"))
+        .stderr(is_match("ERROR.*: Failed to load blob from .*: Permission denied"))
         .stdout(match_nothing_scanned());
 }
 
@@ -127,29 +127,100 @@ fn scan_git_emptyrepo() {
 }
 
 #[test]
-fn scan_secrets1() {
+fn scan_fs_1() {
     let scan_env = ScanEnv::new();
     let input = scan_env.input_file_with_secret("input.txt");
 
     noseyparker_success!("scan", "-d", scan_env.dspath(), input.path())
-        .stdout(match_scan_stats("81 B", 1, 1, 1));
+        .stdout(match_scan_stats("104 B", 1, 1, 1));
 
     assert_cmd_snapshot!(noseyparker_success!("summarize", "-d", scan_env.dspath()));
 
     with_settings!({
-        filters => vec![
-            (r"(?m)^(\s*File: ).*$", r"$1 <FILENAME>"),
-            (r"(?m)^(\s*Blob: ).*$", r"$1 <BLOB>"),
-        ],
+        filters => get_report_stdout_filters(),
     }, {
         assert_cmd_snapshot!(noseyparker_success!("report", "-d", scan_env.dspath()));
     });
 
     let cmd = noseyparker_success!("report", "-d", scan_env.dspath(), "--format=json");
     let json_output: serde_json::Value = serde_json::from_slice(&cmd.get_output().stdout).unwrap();
-    assert_json_snapshot!(json_output, {
-        "[].matches[].provenance[].path" => "<ROOT>/input.txt"
+    with_settings!({
+        redactions => get_report_json_redactions()
+    }, {
+        assert_json_snapshot!(json_output);
     });
+}
+
+// N.B. using a macro instead of a function here to avoid clobbering snapshot files
+macro_rules! scan_enumerator_common {
+    ($scan_env:expr, $enumerator_input:expr) => {
+        noseyparker_success!("scan", "-d", $scan_env.dspath(), "--enumerator", $enumerator_input.path())
+            .stdout(match_scan_stats("104 B", 1, 1, 1));
+
+        assert_cmd_snapshot!(noseyparker_success!("summarize", "-d", $scan_env.dspath()));
+
+        with_settings!({
+            filters => get_report_stdout_filters(),
+        }, {
+            assert_cmd_snapshot!(noseyparker_success!("report", "-d", $scan_env.dspath()));
+        });
+
+        let cmd = noseyparker_success!("report", "-d", $scan_env.dspath(), "--format=json");
+        let json_output: serde_json::Value = serde_json::from_slice(&cmd.get_output().stdout).unwrap();
+        with_settings!({
+            redactions => get_report_json_redactions()
+        }, {
+            assert_json_snapshot!(json_output);
+        });
+    }
+}
+
+#[test]
+fn scan_enumerator_1() {
+    let scan_env = ScanEnv::new();
+
+    let input = scan_env.input_with_secret();
+    let jsonl_input = &serde_json::json!({
+        "content": input,
+        "provenance": {
+            "filename": "input.txt",
+        }
+    })
+    .to_string();
+    let enumerator_input = scan_env.input_file_with_contents("input.txt", jsonl_input);
+    scan_enumerator_common!(&scan_env, enumerator_input);
+}
+
+#[test]
+fn scan_enumerator_base64_1() {
+    use base64::prelude::*;
+
+    let scan_env = ScanEnv::new();
+
+    let input = scan_env.input_with_secret();
+    let jsonl_input = &serde_json::json!({
+        "content_base64": BASE64_STANDARD.encode(input),
+        "provenance": {
+            "filename": "input.txt",
+        }
+    })
+    .to_string();
+    let enumerator_input = scan_env.input_file_with_contents("input.txt", jsonl_input);
+    scan_enumerator_common!(&scan_env, enumerator_input);
+}
+
+#[test]
+fn scan_enumerator_string_provenance() {
+    let scan_env = ScanEnv::new();
+
+    let input = scan_env.input_with_secret();
+    let jsonl_input = &serde_json::json!({
+        "content": input,
+        "provenance": "input.txt",
+    })
+    .to_string();
+    let enumerator_input = scan_env.input_file_with_contents("input.txt", jsonl_input);
+    scan_enumerator_common!(&scan_env, enumerator_input);
 }
 
 #[test]
@@ -158,7 +229,7 @@ fn scan_default_datastore() {
     let input = scan_env.input_file("input.txt");
 
     let ds = scan_env.root.child("datastore.np");
-    ds.assert(predicates::path::missing());
+    ds.assert(predicate::path::missing());
 
     // first scan with the default datastore
     noseyparker!("scan", input.path())
@@ -167,8 +238,8 @@ fn scan_default_datastore() {
         .success()
         .stdout(match_scan_stats("0 B", 1, 0, 0));
 
-    ds.assert(predicates::path::is_dir());
-    input.assert(predicates::path::is_file());
+    ds.assert(predicate::path::is_dir());
+    input.assert(predicate::path::is_file());
 
     // Make sure that summarization and reporting works without an explicit datastore
     let cmd = noseyparker!("report", "--format=json")
@@ -203,26 +274,12 @@ fn scan_default_datastore() {
 fn summarize_nonexistent_default_datastore() {
     let scan_env = ScanEnv::new();
     let ds = scan_env.root.child("datastore.np");
-    ds.assert(predicates::path::missing());
+    ds.assert(predicate::path::missing());
 
     assert_cmd_snapshot!(noseyparker!("summarize")
         .current_dir(scan_env.root.path())
         .assert()
         .failure());
 
-    ds.assert(predicates::path::missing());
-}
-
-#[test]
-fn report_nonexistent_default_datastore() {
-    let scan_env = ScanEnv::new();
-    let ds = scan_env.root.child("datastore.np");
-    ds.assert(predicates::path::missing());
-
-    assert_cmd_snapshot!(noseyparker!("report")
-        .current_dir(scan_env.root.path())
-        .assert()
-        .failure());
-
-    ds.assert(predicates::path::missing());
+    ds.assert(predicate::path::missing());
 }

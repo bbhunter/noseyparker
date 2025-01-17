@@ -12,10 +12,10 @@ pub use auth::Auth;
 pub use client::Client;
 pub use client_builder::ClientBuilder;
 pub use error::Error;
-pub use repo_enumerator::{RepoEnumerator, RepoSpecifiers};
+pub use repo_enumerator::{RepoEnumerator, RepoSpecifiers, RepoType};
 pub use result::Result;
 
-use crate::progress::Progress;
+use progress::Progress;
 
 /// List accessible repository URLs matching the given specifiers.
 ///
@@ -24,6 +24,7 @@ use crate::progress::Progress;
 pub fn enumerate_repo_urls(
     repo_specifiers: &RepoSpecifiers,
     github_url: Url,
+    ignore_certs: bool,
     progress: Option<&mut Progress>,
 ) -> anyhow::Result<Vec<String>> {
     use anyhow::{bail, Context};
@@ -34,6 +35,7 @@ pub fn enumerate_repo_urls(
         .context("Failed to set base URL")?
         .personal_access_token_from_env()
         .context("Failed to get GitHub access token from environment")?
+        .ignore_certs(ignore_certs)
         .build()
         .context("Failed to initialize GitHub client")?;
 

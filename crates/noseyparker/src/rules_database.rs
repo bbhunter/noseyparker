@@ -1,45 +1,37 @@
 use anyhow::{bail, Result};
-use vectorscan::{BlockDatabase, Pattern, Flag};
 use regex::bytes::Regex;
-use std::path::Path;
 use std::time::Instant;
 use tracing::{debug, debug_span};
+use vectorscan_rs::{BlockDatabase, Flag, Pattern};
 
-use crate::rules::{Rule, Rules};
+use noseyparker_rules::Rule;
 
 pub struct RulesDatabase {
     // NOTE: pub(crate) here so that `Matcher` can access these
-    pub(crate) rules: Rules,
+    pub(crate) rules: Vec<Rule>,
     pub(crate) anchored_regexes: Vec<Regex>,
     pub(crate) vsdb: BlockDatabase,
 }
 
 impl RulesDatabase {
-    /// Create a new `RulesDatabase` with the built-in default set of rules.
-    pub fn from_default_rules() -> Result<Self> {
-        Self::from_rules(Rules::from_default_rules()?)
-    }
-
-    /// Create a new `RulesDatabase` from rules files found within the given directory.
-    pub fn from_directory<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::from_rules(Rules::from_directory(path)?)
-    }
-
-    /// Create a new `RulesDatabase` from the given set of rules.
-    pub fn from_rules(rules: Rules) -> Result<Self> {
+    /// Create a new `RulesDatabase` from the given collection of rules.
+    pub fn from_rules(rules: Vec<Rule>) -> Result<Self> {
         let _span = debug_span!("RulesDatabase::from_rules").entered();
 
-        if rules.rules.is_empty() {
+        if rules.is_empty() {
             bail!("No rules to compile");
         }
 
         let patterns = rules
-            .rules
             .iter()
             .enumerate()
             .map(|(id, r)| {
                 let id = id.try_into().unwrap();
-                Pattern::new(r.pattern.clone().into_bytes(), Flag::default(), Some(id))
+                // We *can* enable SOM_LEFTMOST if rules are carefully written. But it seems to
+                // reduce scan performance and increase memory use notably. So skip it!
+                //
+                // Pattern::new(r.syntax().pattern.clone().into_bytes(), Flag::default() | Flag::SOM_LEFTMOST, Some(id))
+                Pattern::new(r.syntax().pattern.clone().into_bytes(), Flag::default(), Some(id))
             })
             .collect::<Vec<Pattern>>();
 
@@ -49,13 +41,12 @@ impl RulesDatabase {
 
         let t2 = Instant::now();
         let anchored_regexes = rules
-            .rules
             .iter()
-            .map(Rule::as_anchored_regex)
+            .map(|r| r.syntax().as_anchored_regex())
             .collect::<Result<Vec<Regex>>>()?;
         let d2 = t2.elapsed().as_secs_f64();
 
-        debug!("Compiled {} rules: vectorscan {}s; regex {}s", rules.rules.len(), d1, d2);
+        debug!("Compiled {} rules: vectorscan {}s; regex {}s", rules.len(), d1, d2);
         Ok(RulesDatabase {
             rules,
             vsdb,
@@ -63,19 +54,16 @@ impl RulesDatabase {
         })
     }
 
-    // pub fn serialize(&self) -> Result<()> {
-    //     let bytes = self.vsdb.serialize()?;
-    //     debug!("{} bytes for serialized database", bytes.len());
-    //     panic!("unimplemented!");
-    //     // Ok(())
-    // }
-
     pub fn num_rules(&self) -> usize {
         self.rules.len()
     }
 
     pub fn get_rule(&self, index: usize) -> Option<&Rule> {
-        self.rules.rules.get(index)
+        self.rules.get(index)
+    }
+
+    pub fn rules(&self) -> &[Rule] {
+        self.rules.as_slice()
     }
 }
 
@@ -86,7 +74,7 @@ mod test {
 
     #[test]
     pub fn test_vectorscan_sanity() -> Result<()> {
-        use vectorscan::{BlockDatabase, Pattern, Scan, BlockScanner};
+        use vectorscan_rs::{BlockDatabase, BlockScanner, Pattern, Scan};
 
         let input = b"some test data for vectorscan";
         let pattern = Pattern::new(b"test".to_vec(), Flag::CASELESS | Flag::SOM_LEFTMOST, None);
@@ -102,6 +90,42 @@ mod test {
         })?;
 
         assert_eq!(matches, vec![(5, 9)]);
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_vectorscan_utf8() -> Result<()> {
+        use vectorscan_rs::{BlockDatabase, BlockScanner, Pattern, Scan};
+
+        let pattern = r"(?i)(Güten Tag)";
+        let pattern = Pattern::new(pattern.as_bytes().to_vec(), Flag::UTF8 | Flag::UCP, None);
+        let db: BlockDatabase = BlockDatabase::new(vec![pattern])?;
+
+        let mut scanner = BlockScanner::new(&db)?;
+
+        {
+            let input = "GÜTEN TAG";
+            let mut matches: Vec<(u64, u64)> = vec![];
+            scanner.scan(input.as_bytes(), |id: u32, from: u64, to: u64, _flags: u32| {
+                println!("found pattern #{} @ [{}, {})", id, from, to);
+                matches.push((from, to));
+                Scan::Continue
+            })?;
+
+            assert_eq!(matches, vec![(0, 10)]);
+        }
+
+        {
+            let input = "güten tag";
+            let mut matches: Vec<(u64, u64)> = vec![];
+            scanner.scan(input.as_bytes(), |id: u32, from: u64, to: u64, _flags: u32| {
+                println!("found pattern #{} @ [{}, {})", id, from, to);
+                matches.push((from, to));
+                Scan::Continue
+            })?;
+
+            assert_eq!(matches, vec![(0, 10)]);
+        }
         Ok(())
     }
 }
